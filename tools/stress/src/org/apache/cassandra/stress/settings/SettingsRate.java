@@ -26,6 +26,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.cassandra.stress.util.ResultLogger;
+
 public class SettingsRate implements Serializable
 {
 
@@ -94,6 +96,19 @@ public class SettingsRate implements Serializable
 
     // CLI Utility Methods
 
+    public void printSettings(ResultLogger out)
+    {
+        out.printf("  Auto: %b%n", auto);
+        if (auto)
+        {
+            out.printf("  Min Threads: %d%n", minThreads);
+            out.printf("  Max Threads: %d%n", maxThreads);
+        } else {
+            out.printf("  Thread Count: %d%n", threadCount);
+            out.printf("  OpsPer Sec: %d%n", opsPerSecond);
+        }
+    }
+
     public static SettingsRate get(Map<String, String[]> clArgs, SettingsCommand command)
     {
         String[] params = clArgs.remove("-rate");
@@ -136,14 +151,7 @@ public class SettingsRate implements Serializable
 
     public static Runnable helpPrinter()
     {
-        return new Runnable()
-        {
-            @Override
-            public void run()
-            {
-                printHelp();
-            }
-        };
+        return SettingsRate::printHelp;
     }
 }
 

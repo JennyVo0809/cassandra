@@ -29,22 +29,27 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import com.google.common.base.Objects;
-import com.google.common.collect.ImmutableList;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
 import org.junit.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.datastax.driver.core.*;
+import com.datastax.driver.core.DataType;
 import com.datastax.driver.core.ResultSet;
+
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
-import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.index.SecondaryIndexManager;
+import org.apache.cassandra.config.EncryptionOptions;
+import org.apache.cassandra.schema.*;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.cql3.functions.FunctionName;
 import org.apache.cassandra.cql3.functions.ThreadAwareSecurityManager;
 import org.apache.cassandra.cql3.statements.ParsedStatement;
@@ -56,12 +61,14 @@ import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.locator.AbstractEndpointSnitch;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.transport.Event;
-import org.apache.cassandra.transport.Server;
+import org.apache.cassandra.transport.*;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -82,35 +89,65 @@ public abstract class CQLTester
     protected static final long ROW_CACHE_SIZE_IN_MB = Integer.valueOf(System.getProperty("cassandra.test.row_cache_size_in_mb", "0"));
     private static final AtomicInteger seqNumber = new AtomicInteger();
     protected static final ByteBuffer TOO_BIG = ByteBuffer.allocate(FBUtilities.MAX_UNSIGNED_SHORT + 1024);
+    public static final String DATA_CENTER = "datacenter1";
+    public static final String RACK1 = "rack1";
 
     private static org.apache.cassandra.transport.Server server;
     protected static final int nativePort;
     protected static final InetAddress nativeAddr;
-    private static final Map<Integer, Cluster> clusters = new HashMap<>();
-    private static final Map<Integer, Session> sessions = new HashMap<>();
+    private static final Map<ProtocolVersion, Cluster> clusters = new HashMap<>();
+    protected static final Map<ProtocolVersion, Session> sessions = new HashMap<>();
 
     private static boolean isServerPrepared = false;
 
-    public static final List<Integer> PROTOCOL_VERSIONS;
+    public static final List<ProtocolVersion> PROTOCOL_VERSIONS = new ArrayList<>(ProtocolVersion.SUPPORTED.size());
+
+    private static final String CREATE_INDEX_NAME_REGEX = "(\\s*(\\w*|\"\\w*\")\\s*)";
+    private static final String CREATE_INDEX_REGEX = String.format("\\A\\s*CREATE(?:\\s+CUSTOM)?\\s+INDEX" +
+                                                                   "(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s*" +
+                                                                   "%s?\\s*ON\\s+(%<s\\.)?%<s\\s*" +
+                                                                   "(\\((?:\\s*\\w+\\s*\\()?%<s\\))?",
+                                                                   CREATE_INDEX_NAME_REGEX);
+    private static final Pattern CREATE_INDEX_PATTERN = Pattern.compile(CREATE_INDEX_REGEX, Pattern.CASE_INSENSITIVE);
+
+    /** Return the current server version if supported by the driver, else
+     * the latest that is supported.
+     *
+     * @return - the preferred versions that is also supported by the driver
+     */
+    public static final ProtocolVersion getDefaultVersion()
+    {
+        return PROTOCOL_VERSIONS.contains(ProtocolVersion.CURRENT)
+               ? ProtocolVersion.CURRENT
+               : PROTOCOL_VERSIONS.get(PROTOCOL_VERSIONS.size() - 1);
+    }
     static
     {
+        DatabaseDescriptor.daemonInitialization();
+
         // The latest versions might not be supported yet by the java driver
-        ImmutableList.Builder<Integer> builder = ImmutableList.builder();
-        for (int version = Server.MIN_SUPPORTED_VERSION; version <= Server.CURRENT_VERSION; version++)
+        for (ProtocolVersion version : ProtocolVersion.SUPPORTED)
         {
             try
             {
-                ProtocolVersion.fromInt(version);
-                builder.add(version);
+                com.datastax.driver.core.ProtocolVersion.fromInt(version.asInt());
+                PROTOCOL_VERSIONS.add(version);
             }
             catch (IllegalArgumentException e)
             {
-                break;
+                logger.warn("Protocol Version {} not supported by java driver", version);
             }
         }
-        PROTOCOL_VERSIONS = builder.build();
 
         nativeAddr = InetAddress.getLoopbackAddress();
+
+        // Register an EndpointSnitch which returns fixed values for test.
+        DatabaseDescriptor.setEndpointSnitch(new AbstractEndpointSnitch()
+        {
+            @Override public String getRack(InetAddress endpoint) { return RACK1; }
+            @Override public String getDatacenter(InetAddress endpoint) { return DATA_CENTER; }
+            @Override public int compareEndpoints(InetAddress target, InetAddress a1, InetAddress a2) { return 0; }
+        });
 
         try
         {
@@ -149,6 +186,8 @@ public abstract class CQLTester
         if (isServerPrepared)
             return;
 
+        DatabaseDescriptor.daemonInitialization();
+
         // Cleanup first
         try
         {
@@ -171,6 +210,7 @@ public abstract class CQLTester
         ThreadAwareSecurityManager.install();
 
         Keyspace.setInitialized();
+        SystemKeyspace.persistLocalMetadata();
         isServerPrepared = true;
     }
 
@@ -343,17 +383,23 @@ public abstract class CQLTester
         server = new Server.Builder().withHost(nativeAddr).withPort(nativePort).build();
         server.start();
 
-        for (int version : PROTOCOL_VERSIONS)
+        for (ProtocolVersion version : PROTOCOL_VERSIONS)
         {
             if (clusters.containsKey(version))
                 continue;
 
-            Cluster cluster = Cluster.builder()
-                                     .addContactPoints(nativeAddr)
-                                     .withClusterName("Test Cluster")
-                                     .withPort(nativePort)
-                                     .withProtocolVersion(ProtocolVersion.fromInt(version))
-                                     .build();
+            Cluster.Builder builder = Cluster.builder()
+                                             .withoutJMXReporting()
+                                             .addContactPoints(nativeAddr)
+                                             .withClusterName("Test Cluster")
+                                             .withPort(nativePort);
+
+            if (version.isBeta())
+                builder = builder.allowBetaProtocolVersion();
+            else
+                builder = builder.withProtocolVersion(com.datastax.driver.core.ProtocolVersion.fromInt(version.asInt()));
+
+            Cluster cluster = builder.build();
             clusters.put(version, cluster);
             sessions.put(version, cluster.connect());
 
@@ -409,7 +455,8 @@ public abstract class CQLTester
     public void disableCompaction(String keyspace)
     {
         ColumnFamilyStore store = getCurrentColumnFamilyStore(keyspace);
-        store.disableAutoCompaction();
+        if (store != null)
+            store.disableAutoCompaction();
     }
 
     public void compact()
@@ -424,6 +471,23 @@ public abstract class CQLTester
         {
             throw new RuntimeException(e);
         }
+    }
+
+    public void disableCompaction()
+    {
+        disableCompaction(KEYSPACE);
+    }
+
+    public void enableCompaction(String keyspace)
+    {
+        ColumnFamilyStore store = getCurrentColumnFamilyStore(keyspace);
+        if (store != null)
+            store.enableAutoCompaction();
+    }
+
+    public void enableCompaction()
+    {
+        enableCompaction(KEYSPACE);
     }
 
     public void cleanupCache()
@@ -599,16 +663,49 @@ public abstract class CQLTester
 
     protected void dropTable(String query)
     {
-        String fullQuery = String.format(query, KEYSPACE + "." + currentTable());
-        logger.info(fullQuery);
-        schemaChange(fullQuery);
+        dropFormattedTable(String.format(query, KEYSPACE + "." + currentTable()));
     }
 
-    protected void createIndex(String query)
+    protected void dropFormattedTable(String formattedQuery)
     {
-        String fullQuery = formatQuery(query);
-        logger.info(fullQuery);
-        schemaChange(fullQuery);
+        logger.info(formattedQuery);
+        schemaChange(formattedQuery);
+    }
+
+    protected String createIndex(String query)
+    {
+        String formattedQuery = formatQuery(query);
+        return createFormattedIndex(formattedQuery);
+    }
+
+    protected String createFormattedIndex(String formattedQuery)
+    {
+        logger.info(formattedQuery);
+        String indexName = getCreateIndexName(formattedQuery);
+        schemaChange(formattedQuery);
+        return indexName;
+    }
+
+    protected static String getCreateIndexName(String formattedQuery)
+    {
+        Matcher matcher = CREATE_INDEX_PATTERN.matcher(formattedQuery);
+        if (!matcher.find())
+            throw new IllegalArgumentException("Expected valid create index query but found: " + formattedQuery);
+
+        String index = matcher.group(2);
+        if (!Strings.isNullOrEmpty(index))
+            return index;
+
+        String keyspace = matcher.group(5);
+        if (Strings.isNullOrEmpty(keyspace))
+            throw new IllegalArgumentException("Keyspace name should be specified: " + formattedQuery);
+
+        String table = matcher.group(7);
+        if (Strings.isNullOrEmpty(table))
+            throw new IllegalArgumentException("Table name should be specified: " + formattedQuery);
+
+        String column = matcher.group(9);
+        return Indexes.getAvailableIndexName(keyspace, table, Strings.isNullOrEmpty(column) ? null : column);
     }
 
     /**
@@ -639,6 +736,38 @@ public abstract class CQLTester
         }
 
         return indexCreated;
+    }
+
+    /**
+     * Index creation is asynchronous, this method waits until the specified index hasn't any building task running.
+     * <p>
+     * This method differs from {@link #waitForIndex(String, String, String)} in that it doesn't require the index to be
+     * fully nor successfully built, so it can be used to wait for failing index builds.
+     *
+     * @param keyspace the index keyspace name
+     * @param indexName the index name
+     * @return {@code true} if the index build tasks have finished in 5 seconds, {@code false} otherwise
+     */
+    protected boolean waitForIndexBuilds(String keyspace, String indexName) throws InterruptedException
+    {
+        long start = System.currentTimeMillis();
+        SecondaryIndexManager indexManager = getCurrentColumnFamilyStore(keyspace).indexManager;
+
+        while (true)
+        {
+            if (!indexManager.isIndexBuilding(indexName))
+            {
+                return true;
+            }
+            else if (System.currentTimeMillis() - start > 5000)
+            {
+                return false;
+            }
+            else
+            {
+                Thread.sleep(10);
+            }
+        }
     }
 
     protected void createIndexMayThrow(String query) throws Throwable
@@ -673,10 +802,10 @@ public abstract class CQLTester
         try
         {
             ClientState state = ClientState.forInternalCalls();
-            state.setKeyspace(SystemKeyspace.NAME);
+            state.setKeyspace(SchemaConstants.SYSTEM_KEYSPACE_NAME);
             QueryState queryState = new QueryState(state);
 
-            ParsedStatement.Prepared prepared = QueryProcessor.parseStatement(query, queryState);
+            ParsedStatement.Prepared prepared = QueryProcessor.parseStatement(query, queryState.getClientState());
             prepared.statement.validate(state);
 
             QueryOptions options = QueryOptions.forInternalCalls(Collections.<ByteBuffer>emptyList());
@@ -690,26 +819,36 @@ public abstract class CQLTester
         }
     }
 
-    protected CFMetaData currentTableMetadata()
+    protected TableMetadata currentTableMetadata()
     {
-        return Schema.instance.getCFMetaData(KEYSPACE, currentTable());
+        return Schema.instance.getTableMetadata(KEYSPACE, currentTable());
     }
 
-    protected com.datastax.driver.core.ResultSet executeNet(int protocolVersion, String query, Object... values) throws Throwable
+    protected com.datastax.driver.core.ResultSet executeNet(ProtocolVersion protocolVersion, String query, Object... values) throws Throwable
     {
         return sessionNet(protocolVersion).execute(formatQuery(query), values);
     }
 
-    protected Session sessionNet()
+    protected com.datastax.driver.core.ResultSet executeNetWithPaging(String query, int pageSize) throws Throwable
     {
-        return sessionNet(PROTOCOL_VERSIONS.get(PROTOCOL_VERSIONS.size() - 1));
+        return sessionNet().execute(new SimpleStatement(formatQuery(query)).setFetchSize(pageSize));
     }
 
-    protected Session sessionNet(int protocolVersion)
+    protected Session sessionNet()
+    {
+        return sessionNet(getDefaultVersion());
+    }
+
+    protected Session sessionNet(ProtocolVersion protocolVersion)
     {
         requireNetwork();
 
         return sessions.get(protocolVersion);
+    }
+
+    protected SimpleClient newSimpleClient(ProtocolVersion version, boolean compression) throws IOException
+    {
+        return new SimpleClient(nativeAddr.getHostAddress(), nativePort, version, version.isBeta(), new EncryptionOptions()).connect(compression);
     }
 
     protected String formatQuery(String query)
@@ -725,7 +864,7 @@ public abstract class CQLTester
 
     protected ResultMessage.Prepared prepare(String query) throws Throwable
     {
-        return QueryProcessor.prepare(formatQuery(query), ClientState.forInternalCalls(), false);
+        return QueryProcessor.prepare(formatQuery(query), ClientState.forInternalCalls());
     }
 
     protected UntypedResultSet execute(String query, Object... values) throws Throwable
@@ -738,8 +877,8 @@ public abstract class CQLTester
         UntypedResultSet rs;
         if (usePrepared)
         {
-            if (logger.isDebugEnabled())
-                logger.debug("Executing: {} with values {}", query, formatAllValues(values));
+            if (logger.isTraceEnabled())
+                logger.trace("Executing: {} with values {}", query, formatAllValues(values));
             if (reusePrepared)
             {
                 rs = QueryProcessor.executeInternal(query, transformValues(values));
@@ -759,24 +898,24 @@ public abstract class CQLTester
         else
         {
             query = replaceValues(query, values);
-            if (logger.isDebugEnabled())
-                logger.debug("Executing: {}", query);
+            if (logger.isTraceEnabled())
+                logger.trace("Executing: {}", query);
             rs = QueryProcessor.executeOnceInternal(query);
         }
         if (rs != null)
         {
-            if (logger.isDebugEnabled())
-                logger.debug("Got {} rows", rs.size());
+            if (logger.isTraceEnabled())
+                logger.trace("Got {} rows", rs.size());
         }
         return rs;
     }
 
     protected void assertRowsNet(ResultSet result, Object[]... rows)
     {
-        assertRowsNet(PROTOCOL_VERSIONS.get(PROTOCOL_VERSIONS.size() - 1), result, rows);
+        assertRowsNet(getDefaultVersion(), result, rows);
     }
 
-    protected void assertRowsNet(int protocolVersion, ResultSet result, Object[]... rows)
+    protected void assertRowsNet(ProtocolVersion protocolVersion, ResultSet result, Object[]... rows)
     {
         // necessary as we need cluster objects to supply CodecRegistry.
         // It's reasonably certain that the network setup has already been done
@@ -798,7 +937,7 @@ public abstract class CQLTester
             Object[] expected = rows[i];
             Row actual = iter.next();
 
-            Assert.assertEquals(String.format("Invalid number of (expected) values provided for row %d (using protocol version %d)",
+            Assert.assertEquals(String.format("Invalid number of (expected) values provided for row %d (using protocol version %s)",
                                               i, protocolVersion),
                                 meta.size(), expected.length);
 
@@ -808,18 +947,18 @@ public abstract class CQLTester
                 com.datastax.driver.core.TypeCodec<Object> codec = clusters.get(protocolVersion).getConfiguration()
                                                                                                 .getCodecRegistry()
                                                                                                 .codecFor(type);
-                ByteBuffer expectedByteValue = codec.serialize(expected[j], ProtocolVersion.fromInt(protocolVersion));
+                ByteBuffer expectedByteValue = codec.serialize(expected[j], com.datastax.driver.core.ProtocolVersion.fromInt(protocolVersion.asInt()));
                 int expectedBytes = expectedByteValue == null ? -1 : expectedByteValue.remaining();
                 ByteBuffer actualValue = actual.getBytesUnsafe(meta.getName(j));
                 int actualBytes = actualValue == null ? -1 : actualValue.remaining();
                 if (!Objects.equal(expectedByteValue, actualValue))
                     Assert.fail(String.format("Invalid value for row %d column %d (%s of type %s), " +
                                               "expected <%s> (%d bytes) but got <%s> (%d bytes) " +
-                                              "(using protocol version %d)",
+                                              "(using protocol version %s)",
                                               i, j, meta.getName(j), type,
                                               codec.format(expected[j]),
                                               expectedBytes,
-                                              codec.format(codec.deserialize(actualValue, ProtocolVersion.fromInt(protocolVersion))),
+                                              codec.format(codec.deserialize(actualValue, com.datastax.driver.core.ProtocolVersion.fromInt(protocolVersion.asInt()))),
                                               actualBytes,
                                               protocolVersion));
             }
@@ -833,11 +972,11 @@ public abstract class CQLTester
                 iter.next();
                 i++;
             }
-            Assert.fail(String.format("Got less rows than expected. Expected %d but got %d (using protocol version %d).",
+            Assert.fail(String.format("Got less rows than expected. Expected %d but got %d (using protocol version %s).",
                                       rows.length, i, protocolVersion));
         }
 
-        Assert.assertTrue(String.format("Got %s rows than expected. Expected %d but got %d (using protocol version %d)",
+        Assert.assertTrue(String.format("Got %s rows than expected. Expected %d but got %d (using protocol version %s)",
                                         rows.length>i ? "less" : "more", rows.length, i, protocolVersion), i == rows.length);
     }
 
@@ -973,6 +1112,22 @@ public abstract class CQLTester
         assert ignoreExtra || expectedRows.size() == actualRows.size();
     }
 
+    protected static List<String> makeRowStrings(UntypedResultSet resultSet)
+    {
+        List<List<ByteBuffer>> rows = new ArrayList<>();
+        for (UntypedResultSet.Row row : resultSet)
+        {
+            List<ByteBuffer> values = new ArrayList<>();
+            for (ColumnSpecification columnSpecification : resultSet.metadata())
+            {
+                values.add(row.getBytes(columnSpecification.name.toString()));
+            }
+            rows.add(values);
+        }
+
+        return makeRowStrings(rows, resultSet.metadata());
+    }
+
     private static List<String> makeRowStrings(Iterable<List<ByteBuffer>> rows, List<ColumnSpecification> meta)
     {
         List<String> strings = new ArrayList<>();
@@ -1081,7 +1236,7 @@ public abstract class CQLTester
     protected void assertEmpty(UntypedResultSet result) throws Throwable
     {
         if (result != null && !result.isEmpty())
-            throw new AssertionError(String.format("Expected empty result but got %d rows", result.size()));
+            throw new AssertionError(String.format("Expected empty result but got %d rows: %s \n", result.size(), makeRowStrings(result)));
     }
 
     protected void assertInvalid(String query, Object... values) throws Throwable
@@ -1101,12 +1256,12 @@ public abstract class CQLTester
 
     protected void assertInvalidThrowMessage(String errorMessage, Class<? extends Throwable> exception, String query, Object... values) throws Throwable
     {
-        assertInvalidThrowMessage(Integer.MIN_VALUE, errorMessage, exception, query, values);
+        assertInvalidThrowMessage(Optional.empty(), errorMessage, exception, query, values);
     }
 
     // if a protocol version > Integer.MIN_VALUE is supplied, executes
     // the query via the java driver, mimicking a real client.
-    protected void assertInvalidThrowMessage(int protocolVersion,
+    protected void assertInvalidThrowMessage(Optional<ProtocolVersion> protocolVersion,
                                              String errorMessage,
                                              Class<? extends Throwable> exception,
                                              String query,
@@ -1114,10 +1269,10 @@ public abstract class CQLTester
     {
         try
         {
-            if (protocolVersion == Integer.MIN_VALUE)
+            if (!protocolVersion.isPresent())
                 execute(query, values);
             else
-                executeNet(protocolVersion, query, values);
+                executeNet(protocolVersion.get(), query, values);
 
             String q = USE_PREPARED_VALUES
                        ? query + " (values: " + formatAllValues(values) + ")"
@@ -1409,7 +1564,7 @@ public abstract class CQLTester
         return s;
     }
 
-    private static ByteBuffer makeByteBuffer(Object value, AbstractType type)
+    protected static ByteBuffer makeByteBuffer(Object value, AbstractType type)
     {
         if (value == null)
             return null;
@@ -1440,7 +1595,7 @@ public abstract class CQLTester
         return type.getString(bb);
     }
 
-    protected Object tuple(Object...values)
+    protected TupleValue tuple(Object...values)
     {
         return new TupleValue(values);
     }
@@ -1475,7 +1630,7 @@ public abstract class CQLTester
     protected Object map(Object...values)
     {
         if (values.length % 2 != 0)
-            throw new IllegalArgumentException();
+            throw new IllegalArgumentException("Invalid number of arguments, got " + values.length);
 
         int size = values.length / 2;
         Map m = new LinkedHashMap(size);
@@ -1484,7 +1639,7 @@ public abstract class CQLTester
         return m;
     }
 
-    protected com.datastax.driver.core.TupleType tupleTypeOf(int protocolVersion, DataType...types)
+    protected com.datastax.driver.core.TupleType tupleTypeOf(ProtocolVersion protocolVersion, DataType...types)
     {
         requireNetwork();
         return clusters.get(protocolVersion).getMetadata().newTupleType(types);
@@ -1511,6 +1666,9 @@ public abstract class CQLTester
 
         if (value instanceof Float)
             return FloatType.instance;
+
+        if (value instanceof Duration)
+            return DurationType.instance;
 
         if (value instanceof Double)
             return DoubleType.instance;

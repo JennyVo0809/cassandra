@@ -17,8 +17,10 @@
  */
 package org.apache.cassandra.db.lifecycle;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.util.*;
@@ -32,7 +34,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.ScheduledExecutors;
-import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.SystemKeyspace;
@@ -163,6 +165,22 @@ class LogTransaction extends Transactional.AbstractTransactional implements Tran
         return new SSTableTidier(reader, false, this);
     }
 
+    Map<SSTableReader, SSTableTidier> bulkObsoletion(Iterable<SSTableReader> sstables)
+    {
+        if (!txnFile.isEmpty())
+            throw new IllegalStateException("Bad state when doing bulk obsoletions");
+
+        txnFile.addAll(Type.REMOVE, sstables);
+        Map<SSTableReader, SSTableTidier> tidiers = new HashMap<>();
+        for (SSTableReader sstable : sstables)
+        {
+            if (tracker != null)
+                tracker.notifyDeleting(sstable);
+            tidiers.put(sstable, new SSTableTidier(sstable, false, this));
+        }
+        return tidiers;
+    }
+
     OperationType type()
     {
         return txnFile.type();
@@ -202,7 +220,16 @@ class LogTransaction extends Transactional.AbstractTransactional implements Tran
         }
         catch (NoSuchFileException e)
         {
-            logger.error("Unable to delete {} as it does not exist", file);
+            logger.error("Unable to delete {} as it does not exist, see debug log file for stack trace", file);
+            if (logger.isDebugEnabled())
+            {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                try (PrintStream ps = new PrintStream(baos))
+                {
+                    e.printStackTrace(ps);
+                }
+                logger.debug("Unable to delete {} as it does not exist, stack trace:\n {}", file, baos);
+            }
         }
         catch (IOException e)
         {
@@ -306,14 +333,19 @@ class LogTransaction extends Transactional.AbstractTransactional implements Tran
 
         public void run()
         {
-            SystemKeyspace.clearSSTableReadMeter(desc.ksname, desc.cfname, desc.generation);
+            if (tracker != null && !tracker.isDummy())
+                SystemKeyspace.clearSSTableReadMeter(desc.ksname, desc.cfname, desc.generation);
 
             try
             {
                 // If we can't successfully delete the DATA component, set the task to be retried later: see TransactionTidier
                 File datafile = new File(desc.filenameFor(Component.DATA));
 
-                delete(datafile);
+                if (datafile.exists())
+                    delete(datafile);
+                else if (!wasNew)
+                    logger.error("SSTableTidier ran with no existing data file for an sstable that was not new");
+
                 // let the remainder be cleaned up by delete
                 SSTable.delete(desc, SSTable.discoverComponentsFor(desc));
             }
@@ -394,7 +426,7 @@ class LogTransaction extends Transactional.AbstractTransactional implements Tran
      * @return true if the leftovers of all transaction logs found were removed, false otherwise.
      *
      */
-    static boolean removeUnfinishedLeftovers(CFMetaData metadata)
+    static boolean removeUnfinishedLeftovers(TableMetadata metadata)
     {
         return removeUnfinishedLeftovers(new Directories(metadata, ColumnFamilyStore.getInitialDirectories()).getCFDirectories());
     }
@@ -442,8 +474,7 @@ class LogTransaction extends Transactional.AbstractTransactional implements Tran
 
         static boolean removeUnfinishedLeftovers(Map.Entry<String, List<File>> entry)
         {
-            LogFile txn = LogFile.make(entry.getKey(), entry.getValue());
-            try
+            try(LogFile txn = LogFile.make(entry.getKey(), entry.getValue()))
             {
                 if (txn.verify())
                 {
@@ -462,10 +493,6 @@ class LogTransaction extends Transactional.AbstractTransactional implements Tran
                     logger.error("Unexpected disk state: failed to read transaction log {}", txn.toString(true));
                     return false;
                 }
-            }
-            finally
-            {
-                txn.close();
             }
         }
     }

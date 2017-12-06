@@ -36,11 +36,12 @@ import org.apache.cassandra.io.util.*;
 import org.apache.cassandra.metrics.CacheMissMetrics;
 import org.apache.cassandra.utils.memory.BufferPool;
 
-public class ChunkCache 
+public class ChunkCache
         implements CacheLoader<ChunkCache.Key, ChunkCache.Buffer>, RemovalListener<ChunkCache.Key, ChunkCache.Buffer>, CacheSize
 {
     public static final int RESERVED_POOL_SPACE_IN_MB = 32;
     public static final long cacheSize = 1024L * 1024L * Math.max(0, DatabaseDescriptor.getFileCacheSizeInMB() - RESERVED_POOL_SPACE_IN_MB);
+    public static final boolean roundUp = DatabaseDescriptor.getFileCacheRoundUp();
 
     private static boolean enabled = cacheSize > 0;
     public static final ChunkCache instance = enabled ? new ChunkCache() : null;
@@ -106,7 +107,7 @@ public class ChunkCache
             {
                 refCount = references.get();
                 if (refCount == 0)
-                    // Buffer was released before we managed to reference it. 
+                    // Buffer was released before we managed to reference it.
                     return null;
             } while (!references.compareAndSet(refCount, refCount + 1));
 
@@ -219,7 +220,7 @@ public class ChunkCache
         {
             source = file;
             int chunkSize = file.chunkSize();
-            assert Integer.bitCount(chunkSize) == 1;    // Must be power of two
+            assert Integer.bitCount(chunkSize) == 1 : String.format("%d must be a power of two", chunkSize);
             alignmentMask = -chunkSize;
         }
 
@@ -289,7 +290,7 @@ public class ChunkCache
         @Override
         public String toString()
         {
-            return "CachingRebufferer:" + source.toString();
+            return "CachingRebufferer:" + source;
         }
     }
 

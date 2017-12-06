@@ -19,11 +19,11 @@ package org.apache.cassandra.db.compaction;
 
 import java.util.*;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
-import com.google.common.util.concurrent.RateLimiter;
 
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.SerializationHeader;
@@ -213,10 +213,12 @@ public abstract class AbstractCompactionStrategy
      */
     public abstract long getMaxSSTableBytes();
 
+    @Deprecated
     public void enable()
     {
     }
 
+    @Deprecated
     public void disable()
     {
     }
@@ -283,24 +285,15 @@ public abstract class AbstractCompactionStrategy
     @SuppressWarnings("resource")
     public ScannerList getScanners(Collection<SSTableReader> sstables, Collection<Range<Token>> ranges)
     {
-        RateLimiter limiter = CompactionManager.instance.getRateLimiter();
         ArrayList<ISSTableScanner> scanners = new ArrayList<ISSTableScanner>();
         try
         {
             for (SSTableReader sstable : sstables)
-                scanners.add(sstable.getScanner(ranges, limiter));
+                scanners.add(sstable.getScanner(ranges));
         }
         catch (Throwable t)
         {
-            try
-            {
-                new ScannerList(scanners).close();
-            }
-            catch (Throwable t2)
-            {
-                t.addSuppressed(t2);
-            }
-            throw t;
+            ISSTableScanner.closeAllAndPropagate(scanners, t);
         }
         return new ScannerList(scanners);
     }
@@ -333,6 +326,12 @@ public abstract class AbstractCompactionStrategy
 
     public abstract void removeSSTable(SSTableReader sstable);
 
+    /**
+     * Returns the sstables managed by this strategy instance
+     */
+    @VisibleForTesting
+    protected abstract Set<SSTableReader> getSSTables();
+
     public static class ScannerList implements AutoCloseable
     {
         public final List<ISSTableScanner> scanners;
@@ -341,26 +340,44 @@ public abstract class AbstractCompactionStrategy
             this.scanners = scanners;
         }
 
-        public void close()
+        public long getTotalBytesScanned()
         {
-            Throwable t = null;
+            long bytesScanned = 0L;
+            for (ISSTableScanner scanner : scanners)
+                bytesScanned += scanner.getBytesScanned();
+
+            return bytesScanned;
+        }
+
+        public long getTotalCompressedSize()
+        {
+            long compressedSize = 0;
+            for (ISSTableScanner scanner : scanners)
+                compressedSize += scanner.getCompressedLengthInBytes();
+
+            return compressedSize;
+        }
+
+        public double getCompressionRatio()
+        {
+            double compressed = 0.0;
+            double uncompressed = 0.0;
+
             for (ISSTableScanner scanner : scanners)
             {
-                try
-                {
-                    scanner.close();
-                }
-                catch (Throwable t2)
-                {
-                    JVMStabilityInspector.inspectThrowable(t2);
-                    if (t == null)
-                        t = t2;
-                    else
-                        t.addSuppressed(t2);
-                }
+                compressed += scanner.getCompressedLengthInBytes();
+                uncompressed += scanner.getLengthInBytes();
             }
-            if (t != null)
-                throw Throwables.propagate(t);
+
+            if (compressed == uncompressed || uncompressed == 0)
+                return MetadataCollector.NO_COMPRESSION_RATIO;
+
+            return compressed / uncompressed;
+        }
+
+        public void close()
+        {
+            ISSTableScanner.closeAllAndPropagate(scanners, null);
         }
     }
 
@@ -500,6 +517,7 @@ public abstract class AbstractCompactionStrategy
         return uncheckedOptions;
     }
 
+    @Deprecated
     public boolean shouldBeEnabled()
     {
         String optionValue = options.get(COMPACTION_ENABLED);
@@ -521,7 +539,7 @@ public abstract class AbstractCompactionStrategy
         Collections.sort(sortedSSTablesToGroup, SSTableReader.sstableComparator);
 
         Collection<Collection<SSTableReader>> groupedSSTables = new ArrayList<>();
-        Collection<SSTableReader> currGroup = new ArrayList<>();
+        Collection<SSTableReader> currGroup = new ArrayList<>(groupSize);
 
         for (SSTableReader sstable : sortedSSTablesToGroup)
         {
@@ -529,7 +547,7 @@ public abstract class AbstractCompactionStrategy
             if (currGroup.size() == groupSize)
             {
                 groupedSSTables.add(currGroup);
-                currGroup = new ArrayList<>();
+                currGroup = new ArrayList<>(groupSize);
             }
         }
 
@@ -546,12 +564,13 @@ public abstract class AbstractCompactionStrategy
     public SSTableMultiWriter createSSTableMultiWriter(Descriptor descriptor,
                                                        long keyCount,
                                                        long repairedAt,
+                                                       UUID pendingRepair,
                                                        MetadataCollector meta,
                                                        SerializationHeader header,
                                                        Collection<Index> indexes,
                                                        LifecycleTransaction txn)
     {
-        return SimpleSSTableMultiWriter.create(descriptor, keyCount, repairedAt, cfs.metadata, meta, header, indexes, txn);
+        return SimpleSSTableMultiWriter.create(descriptor, keyCount, repairedAt, pendingRepair, cfs.metadata, meta, header, indexes, txn);
     }
 
     public boolean supportsEarlyOpen()

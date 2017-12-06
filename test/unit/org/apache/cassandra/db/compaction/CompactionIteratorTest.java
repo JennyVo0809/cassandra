@@ -29,7 +29,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
@@ -40,6 +40,7 @@ import org.apache.cassandra.db.partitions.AbstractUnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.schema.KeyspaceParams;
+import org.apache.cassandra.schema.TableMetadata;
 
 public class CompactionIteratorTest
 {
@@ -49,14 +50,18 @@ public class CompactionIteratorTest
     private static final String KSNAME = "CompactionIteratorTest";
     private static final String CFNAME = "Integer1";
 
-    static final DecoratedKey kk = Util.dk("key");
-    static final CFMetaData metadata;
+    static final DecoratedKey kk;
+    static final TableMetadata metadata;
     private static final int RANGE = 1000;
     private static final int COUNT = 100;
 
     Map<List<Unfiltered>, DeletionTime> deletionTimes = new HashMap<>();
 
     static {
+        DatabaseDescriptor.daemonInitialization();
+
+        kk = Util.dk("key");
+
         SchemaLoader.prepareServer();
         SchemaLoader.createKeyspace(KSNAME,
                                     KeyspaceParams.simple(1),
@@ -65,7 +70,7 @@ public class CompactionIteratorTest
                                                                          1,
                                                                          UTF8Type.instance,
                                                                          Int32Type.instance,
-                                                                         Int32Type.instance));
+                                                                         Int32Type.instance).build());
     }
 
     // See org.apache.cassandra.db.rows.UnfilteredRowsGenerator.parse for the syntax used in these tests.
@@ -333,13 +338,7 @@ public class CompactionIteratorTest
         }
 
         @Override
-        public boolean isForThrift()
-        {
-            return false;
-        }
-
-        @Override
-        public CFMetaData metadata()
+        public TableMetadata metadata()
         {
             return metadata;
         }
@@ -364,6 +363,18 @@ public class CompactionIteratorTest
 
         @Override
         public long getCurrentPosition()
+        {
+            return 0;
+        }
+
+        @Override
+        public long getBytesScanned()
+        {
+            return 0;
+        }
+
+        @Override
+        public long getCompressedLengthInBytes()
         {
             return 0;
         }

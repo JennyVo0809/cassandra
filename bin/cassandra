@@ -99,7 +99,7 @@ else
 fi
 
 if [ -z $JAVA ] ; then
-    echo Unable to find java executable. Check JAVA_HOME and PATH environment variables. > /dev/stderr
+    echo Unable to find java executable. Check JAVA_HOME and PATH environment variables. >&2
     exit 1;
 fi
 
@@ -107,7 +107,7 @@ fi
 # avoid disk I/O. Even for the purpose of CPU efficiency, we don't
 # really have CPU<->data affinity anyway. Also, empirically test that numactl
 # works before trying to use it (CASSANDRA-3245).
-NUMACTL_ARGS="--interleave=all"
+NUMACTL_ARGS=${NUMACTL_ARGS:-"--interleave=all"}
 if which numactl >/dev/null 2>/dev/null && numactl $NUMACTL_ARGS ls / >/dev/null 2>/dev/null
 then
     NUMACTL="numactl $NUMACTL_ARGS"

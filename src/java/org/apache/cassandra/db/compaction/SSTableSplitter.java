@@ -18,6 +18,8 @@
 package org.apache.cassandra.db.compaction;
 
 import java.util.*;
+import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
@@ -25,8 +27,8 @@ import org.apache.cassandra.db.compaction.writers.MaxSSTableSizeWriter;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 
-public class SSTableSplitter {
-
+public class SSTableSplitter 
+{
     private final SplittingCompactionTask task;
 
     private CompactionInfo.Holder info;
@@ -97,9 +99,9 @@ public class SSTableSplitter {
         }
 
         @Override
-        public long maxPurgeableTimestamp(DecoratedKey key)
+        public LongPredicate getPurgeEvaluator(DecoratedKey key)
         {
-            return Long.MIN_VALUE;
+            return time -> false;
         }
     }
 }

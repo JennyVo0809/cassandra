@@ -17,28 +17,33 @@
  */
 package org.apache.cassandra.db.partitions;
 
+import java.util.function.LongPredicate;
+import java.util.function.Predicate;
+
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.transform.Transformation;
 
 public abstract class PurgeFunction extends Transformation<UnfilteredRowIterator>
 {
-    private final boolean isForThrift;
     private final DeletionPurger purger;
     private final int nowInSec;
+
+    private final boolean enforceStrictLiveness;
     private boolean isReverseOrder;
 
-    public PurgeFunction(boolean isForThrift, int nowInSec, int gcBefore, int oldestUnrepairedTombstone, boolean onlyPurgeRepairedTombstones)
+    public PurgeFunction(int nowInSec, int gcBefore, int oldestUnrepairedTombstone, boolean onlyPurgeRepairedTombstones,
+                         boolean enforceStrictLiveness)
     {
-        this.isForThrift = isForThrift;
         this.nowInSec = nowInSec;
         this.purger = (timestamp, localDeletionTime) ->
                       !(onlyPurgeRepairedTombstones && localDeletionTime >= oldestUnrepairedTombstone)
                       && localDeletionTime < gcBefore
-                      && timestamp < getMaxPurgeableTimestamp();
+                      && getPurgeEvaluator().test(timestamp);
+        this.enforceStrictLiveness = enforceStrictLiveness;
     }
 
-    protected abstract long getMaxPurgeableTimestamp();
+    protected abstract LongPredicate getPurgeEvaluator();
 
     // Called at the beginning of each new partition
     protected void onNewPartition(DecoratedKey partitionKey)
@@ -62,7 +67,7 @@ public abstract class PurgeFunction extends Transformation<UnfilteredRowIterator
 
         isReverseOrder = partition.isReverseOrder();
         UnfilteredRowIterator purged = Transformation.apply(partition, this);
-        if (!isForThrift && purged.isEmpty())
+        if (purged.isEmpty())
         {
             onEmptyPartitionPostPurge(purged.partitionKey());
             purged.close();
@@ -82,14 +87,14 @@ public abstract class PurgeFunction extends Transformation<UnfilteredRowIterator
     protected Row applyToStatic(Row row)
     {
         updateProgress();
-        return row.purge(purger, nowInSec);
+        return row.purge(purger, nowInSec, enforceStrictLiveness);
     }
 
     @Override
     protected Row applyToRow(Row row)
     {
         updateProgress();
-        return row.purge(purger, nowInSec);
+        return row.purge(purger, nowInSec, enforceStrictLiveness);
     }
 
     @Override

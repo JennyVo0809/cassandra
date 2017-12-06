@@ -160,7 +160,8 @@ compaction can drop that sstable. If you see sstables with only tombstones (note
 tombstones once the time to live has expired) but it is not being dropped by compaction, it is likely that other
 sstables contain older data. There is a tool called ``sstableexpiredblockers`` that will list which sstables are
 droppable and which are blocking them from being dropped. This is especially useful for time series compaction with
-``TimeWindowCompactionStrategy`` (and the deprecated ``DateTieredCompactionStrategy``).
+``TimeWindowCompactionStrategy`` (and the deprecated ``DateTieredCompactionStrategy``). With ``TimeWindowCompactionStrategy``
+it is possible to remove the guarantee (not check for shadowing data) by enabling ``unsafe_aggressive_sstable_expiration``.
 
 Repaired/unrepaired data
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -262,7 +263,7 @@ and the attribute to change is ``CompactionParameters`` or ``CompactionParameter
 syntax for the json version is the same as you would use in an :ref:`ALTER TABLE <alter-table-statement>` statement -
 for example::
 
-    { 'class': 'LeveledCompactionStrategy', 'sstable_size_in_mb': 123 }
+    { 'class': 'LeveledCompactionStrategy', 'sstable_size_in_mb': 123, 'fanout_size': 10}
 
 The setting is kept until someone executes an :ref:`ALTER TABLE <alter-table-statement>` that touches the compaction
 settings or restarts the node.
@@ -379,6 +380,10 @@ LCS options
     The target compressed (if using compression) sstable size - the sstables can end up being larger if there are very
     large partitions on the node.
 
+``fanout_size`` (default: 10)
+    The target size of levels increases by this fanout_size multiplier. You can reduce the space amplification by tuning
+    this option.
+
 LCS also support the ``cassandra.disable_stcs_in_l0`` startup option (``-Dcassandra.disable_stcs_in_l0=true``) to avoid
 doing STCS in L0.
 
@@ -399,6 +404,11 @@ as the combination of two primary options:
     A Java TimeUnit (MINUTES, HOURS, or DAYS).
 ``compaction_window_size`` (default: 1)
     The number of units that make up a window.
+``unsafe_aggressive_sstable_expiration`` (default: false)
+    Expired sstables will be dropped without checking its data is shadowing other sstables. This is a potentially
+    risky option that can lead to data loss or deleted data re-appearing, going beyond what
+    `unchecked_tombstone_compaction` does for single  sstable compaction. Due to the risk the jvm must also be
+    started with `-Dcassandra.unsafe_aggressive_sstable_expiration=true`.
 
 Taken together, the operator can specify windows of virtually any size, and `TimeWindowCompactionStrategy` will work to
 create a single sstable for writes within that window. For efficiency during writing, the newest window will be

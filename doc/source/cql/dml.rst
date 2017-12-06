@@ -420,7 +420,8 @@ parameters:
   automatically removed from the database after the specified time. Note that the TTL concerns the inserted values, not
   the columns themselves. This means that any subsequent update of the column will also reset the TTL (to whatever TTL
   is specified in that update). By default, values never expire. A TTL of 0 is equivalent to no TTL. If the table has a
-  default_time_to_live, a TTL of 0 will remove the TTL for the inserted or updated values.
+  default_time_to_live, a TTL of 0 will remove the TTL for the inserted or updated values. A TTL of ``null`` is equivalent
+  to inserting with a TTL of 0.
 
 .. _delete_statement:
 
@@ -500,6 +501,7 @@ Note that:
   resolution procedure in the case of `timestamp ties <http://wiki.apache.org/cassandra/FAQ#clocktie>`__, operations may
   be applied in an order that is different from the order they are listed in the ``BATCH`` statement. To force a
   particular operation ordering, you must specify per-operation timestamps.
+- A LOGGED batch to a single partition will be converted to an UNLOGGED batch as an optimization.
 
 .. _unlogged-batches:
 

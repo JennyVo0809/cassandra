@@ -21,12 +21,13 @@ package org.apache.cassandra.stress.settings;
  */
 
 
-import org.apache.cassandra.stress.util.MultiPrintStream;
-
 import java.io.*;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+
+import org.apache.cassandra.stress.util.MultiResultLogger;
+import org.apache.cassandra.stress.util.ResultLogger;
 
 public class SettingsLog implements Serializable
 {
@@ -36,6 +37,7 @@ public class SettingsLog implements Serializable
     }
 
     public final boolean noSummary;
+    public final boolean noSettings;
     public final File file;
     public final File hdrFile;
     public final int intervalMillis;
@@ -43,7 +45,9 @@ public class SettingsLog implements Serializable
 
     public SettingsLog(Options options)
     {
+
         noSummary = options.noSummmary.setByUser();
+        noSettings = options.noSettings.setByUser();
 
         if (options.outputFile.setByUser())
             file = new File(options.outputFile.value());
@@ -65,10 +69,10 @@ public class SettingsLog implements Serializable
         level = Level.valueOf(options.level.value().toUpperCase());
     }
 
-    public MultiPrintStream getOutput() throws FileNotFoundException
+    public MultiResultLogger getOutput() throws FileNotFoundException
     {
         // Always print to stdout regardless of whether we're graphing or not
-        MultiPrintStream stream = new MultiPrintStream(new PrintStream(System.out));
+        MultiResultLogger stream = new MultiResultLogger(new PrintStream(System.out));
 
         if (file != null)
             stream.addStream(new PrintStream(file));
@@ -81,6 +85,7 @@ public class SettingsLog implements Serializable
     public static final class Options extends GroupedOptions
     {
         final OptionSimple noSummmary = new OptionSimple("no-summary", "", null, "Disable printing of aggregate statistics at the end of a test", false);
+        final OptionSimple noSettings = new OptionSimple("no-settings", "", null, "Disable printing of settings values at start of test", false);
         final OptionSimple outputFile = new OptionSimple("file=", ".*", null, "Log to a file", false);
         final OptionSimple hdrOutputFile = new OptionSimple("hdrfile=", ".*", null, "Log to a file", false);
         final OptionSimple interval = new OptionSimple("interval=", "[0-9]+(ms|s|)", "1s", "Log progress every <value> seconds or milliseconds", false);
@@ -89,11 +94,20 @@ public class SettingsLog implements Serializable
         @Override
         public List<? extends Option> options()
         {
-            return Arrays.asList(level, noSummmary, outputFile, hdrOutputFile, interval);
+            return Arrays.asList(level, noSummmary, outputFile, hdrOutputFile, interval, noSettings);
         }
     }
 
     // CLI Utility Methods
+    public void printSettings(ResultLogger out)
+    {
+        out.printf("  No Summary: %b%n", noSummary);
+        out.printf("  No Settings: %b%n", noSettings);
+        out.printf("  File: %s%n", file);
+        out.printf("  Interval Millis: %d%n", intervalMillis);
+        out.printf("  Level: %s%n", level);
+    }
+
 
     public static SettingsLog get(Map<String, String[]> clArgs)
     {

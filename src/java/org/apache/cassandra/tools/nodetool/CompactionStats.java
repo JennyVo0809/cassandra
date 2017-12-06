@@ -22,8 +22,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
-import io.airlift.command.Command;
-import io.airlift.command.Option;
+import io.airlift.airline.Command;
+import io.airlift.airline.Option;
 
 import org.apache.cassandra.db.compaction.CompactionManagerMBean;
 import org.apache.cassandra.db.compaction.OperationType;
@@ -72,10 +72,11 @@ public class CompactionStats extends NodeToolCmd
 
     public static void reportCompactionTable(List<Map<String,String>> compactions, int compactionThroughput, boolean humanReadable)
     {
-        long remainingBytes = 0;
-        TableBuilder table = new TableBuilder();
         if (!compactions.isEmpty())
         {
+            long remainingBytes = 0;
+            TableBuilder table = new TableBuilder();
+
             table.add("id", "compaction type", "keyspace", "table", "completed", "total", "unit", "progress");
             for (Map<String, String> c : compactions)
             {

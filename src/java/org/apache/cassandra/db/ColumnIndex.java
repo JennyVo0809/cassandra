@@ -199,7 +199,7 @@ public class ColumnIndex
             indexSamplesSerializedSize += idxSerializer.serializedSize(cIndexInfo);
             if (indexSamplesSerializedSize + columnIndexCount * TypeSizes.sizeof(0) > DatabaseDescriptor.getColumnIndexCacheSize())
             {
-                buffer = useBuffer();
+                buffer = reuseOrAllocateBuffer();
                 for (IndexInfo indexSample : indexSamples)
                 {
                     idxSerializer.serialize(indexSample, buffer);
@@ -219,11 +219,14 @@ public class ColumnIndex
         firstClustering = null;
     }
 
-    private DataOutputBuffer useBuffer()
+    private DataOutputBuffer reuseOrAllocateBuffer()
     {
+        // Check whether a reusable DataOutputBuffer already exists for this
+        // ColumnIndex instance and return it.
         if (reusableBuffer != null) {
-            buffer = reusableBuffer;
+            DataOutputBuffer buffer = reusableBuffer;
             buffer.clear();
+            return buffer;
         }
         // don't use the standard RECYCLER as that only recycles up to 1MB and requires proper cleanup
         return new DataOutputBuffer(DatabaseDescriptor.getColumnIndexCacheSize() * 2);

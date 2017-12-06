@@ -26,6 +26,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import org.apache.cassandra.stress.StressAction.MeasurementSink;
 import org.apache.cassandra.stress.generate.DistributionFactory;
 import org.apache.cassandra.stress.generate.PartitionGenerator;
 import org.apache.cassandra.stress.generate.SeedManager;
@@ -37,7 +38,8 @@ import org.apache.cassandra.stress.operations.FixedOpDistribution;
 import org.apache.cassandra.stress.operations.OpDistribution;
 import org.apache.cassandra.stress.operations.OpDistributionFactory;
 import org.apache.cassandra.stress.operations.predefined.PredefinedOperation;
-import org.apache.cassandra.stress.util.Timing;
+import org.apache.cassandra.stress.report.Timer;
+import org.apache.cassandra.stress.util.ResultLogger;
 
 // Settings unique to the mixed command type
 public class SettingsCommandPreDefined extends SettingsCommand
@@ -45,15 +47,18 @@ public class SettingsCommandPreDefined extends SettingsCommand
 
     public final DistributionFactory add;
     public final int keySize;
+    public final Options options;
 
     public OpDistributionFactory getFactory(final StressSettings settings)
     {
         final SeedManager seeds = new SeedManager(settings);
         return new OpDistributionFactory()
         {
-            public OpDistribution get(Timing timing, boolean isWarmup)
+            public OpDistribution get(boolean isWarmup, MeasurementSink sink)
             {
-                return new FixedOpDistribution(PredefinedOperation.operation(type, timing.newTimer(type.toString()),
+                final Timer timer1 = new Timer(type.toString(), sink);
+                final Timer timer = timer1;
+                return new FixedOpDistribution(PredefinedOperation.operation(type, timer,
                                                newGenerator(settings), seeds, settings, add));
             }
 
@@ -85,6 +90,7 @@ public class SettingsCommandPreDefined extends SettingsCommand
     public SettingsCommandPreDefined(Command type, Options options)
     {
         super(type, options.parent);
+        this.options = options;
         add = options.add.get();
         keySize = Integer.parseInt(options.keysize.value());
     }
@@ -115,6 +121,13 @@ public class SettingsCommandPreDefined extends SettingsCommand
     }
 
     // CLI utility methods
+
+    public void printSettings(ResultLogger out)
+    {
+        super.printSettings(out);
+        out.printf("  Key Size (bytes): %d%n", keySize);
+        out.printf("  Counter Increment Distibution: %s%n", options.add.getOptionAsString());
+    }
 
     public static SettingsCommandPreDefined build(Command type, String[] params)
     {

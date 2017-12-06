@@ -21,10 +21,11 @@ import java.nio.ByteBuffer;
 
 import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.cql3.selection.Selection.ResultSetBuilder;
+import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.transport.ProtocolVersion;
 
 final class FieldSelector extends Selector
 {
@@ -60,15 +61,30 @@ final class FieldSelector extends Selector
             {
                 return factory.isAggregateSelectorFactory();
             }
+
+            public boolean areAllFetchedColumnsKnown()
+            {
+                return factory.areAllFetchedColumnsKnown();
+            }
+
+            public void addFetchedColumns(ColumnFilter.Builder builder)
+            {
+                factory.addFetchedColumns(builder);
+            }
         };
     }
 
-    public void addInput(int protocolVersion, ResultSetBuilder rs) throws InvalidRequestException
+    public void addFetchedColumns(ColumnFilter.Builder builder)
+    {
+        selected.addFetchedColumns(builder);
+    }
+
+    public void addInput(ProtocolVersion protocolVersion, ResultSetBuilder rs) throws InvalidRequestException
     {
         selected.addInput(protocolVersion, rs);
     }
 
-    public ByteBuffer getOutput(int protocolVersion) throws InvalidRequestException
+    public ByteBuffer getOutput(ProtocolVersion protocolVersion) throws InvalidRequestException
     {
         ByteBuffer value = selected.getOutput(protocolVersion);
         if (value == null)

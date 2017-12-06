@@ -22,8 +22,6 @@ import java.lang.reflect.Field;
 import java.math.BigInteger;
 import java.net.*;
 import java.nio.ByteBuffer;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.zip.CRC32;
@@ -34,6 +32,8 @@ import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
+import com.google.common.base.Strings;
+
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,7 +55,6 @@ import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.metadata.MetadataComponent;
 import org.apache.cassandra.io.sstable.metadata.MetadataType;
 import org.apache.cassandra.io.sstable.metadata.ValidationMetadata;
-import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputBufferFixed;
 import org.apache.cassandra.io.util.FileUtils;
@@ -75,53 +74,22 @@ public class FBUtilities
 
     private static final String OPERATING_SYSTEM = System.getProperty("os.name").toLowerCase();
     public static final boolean isWindows = OPERATING_SYSTEM.contains("windows");
+    public static final boolean isLinux = OPERATING_SYSTEM.contains("linux");
 
     private static volatile InetAddress localInetAddress;
     private static volatile InetAddress broadcastInetAddress;
+    private static volatile InetAddress broadcastRpcAddress;
 
     public static int getAvailableProcessors()
     {
-        if (System.getProperty("cassandra.available_processors") != null)
-            return Integer.parseInt(System.getProperty("cassandra.available_processors"));
+        String availableProcessors = System.getProperty("cassandra.available_processors");
+        if (!Strings.isNullOrEmpty(availableProcessors))
+            return Integer.parseInt(availableProcessors);
         else
             return Runtime.getRuntime().availableProcessors();
     }
 
-    private static final ThreadLocal<MessageDigest> localMD5Digest = new ThreadLocal<MessageDigest>()
-    {
-        @Override
-        protected MessageDigest initialValue()
-        {
-            return newMessageDigest("MD5");
-        }
-
-        @Override
-        public MessageDigest get()
-        {
-            MessageDigest digest = super.get();
-            digest.reset();
-            return digest;
-        }
-    };
-
     public static final int MAX_UNSIGNED_SHORT = 0xFFFF;
-
-    public static MessageDigest threadLocalMD5Digest()
-    {
-        return localMD5Digest.get();
-    }
-
-    public static MessageDigest newMessageDigest(String algorithm)
-    {
-        try
-        {
-            return MessageDigest.getInstance(algorithm);
-        }
-        catch (NoSuchAlgorithmException nsae)
-        {
-            throw new RuntimeException("the requested digest algorithm (" + algorithm + ") is not available", nsae);
-        }
-    }
 
     /**
      * Please use getBroadcastAddress instead. You need this only when you have to listen/connect.
@@ -151,6 +119,23 @@ public class FBUtilities
         return broadcastInetAddress;
     }
 
+    /**
+     * <b>THIS IS FOR TESTING ONLY!!</b>
+     */
+    public static void setBroadcastInetAddress(InetAddress addr)
+    {
+        broadcastInetAddress = addr;
+    }
+
+    public static InetAddress getBroadcastRpcAddress()
+    {
+        if (broadcastRpcAddress == null)
+            broadcastRpcAddress = DatabaseDescriptor.getBroadcastRpcAddress() == null
+                                   ? DatabaseDescriptor.getRpcAddress()
+                                   : DatabaseDescriptor.getBroadcastRpcAddress();
+        return broadcastRpcAddress;
+    }
+
     public static Collection<InetAddress> getAllLocalAddresses()
     {
         Set<InetAddress> localAddresses = new HashSet<InetAddress>();
@@ -172,10 +157,14 @@ public class FBUtilities
 
     public static String getNetworkInterface(InetAddress localAddress)
     {
-        try {
-            for(NetworkInterface ifc : Collections.list(NetworkInterface.getNetworkInterfaces())) {
-                if(ifc.isUp()) {
-                    for(InetAddress addr : Collections.list(ifc.getInetAddresses())) {
+        try
+        {
+            for(NetworkInterface ifc : Collections.list(NetworkInterface.getNetworkInterfaces()))
+            {
+                if(ifc.isUp())
+                {
+                    for(InetAddress addr : Collections.list(ifc.getInetAddresses()))
+                    {
                         if (addr.equals(localAddress))
                             return ifc.getDisplayName();
                     }
@@ -249,25 +238,6 @@ public class FBUtilities
             out[i] = (byte)((left[i] & 0xFF) ^ (right[i] & 0xFF));
         }
         return out;
-    }
-
-    public static byte[] hash(ByteBuffer... data)
-    {
-        MessageDigest messageDigest = localMD5Digest.get();
-        for (ByteBuffer block : data)
-        {
-            if (block.hasArray())
-                messageDigest.update(block.array(), block.arrayOffset() + block.position(), block.remaining());
-            else
-                messageDigest.update(block.duplicate());
-        }
-
-        return messageDigest.digest();
-    }
-
-    public static BigInteger hashToBigInteger(ByteBuffer data)
-    {
-        return new BigInteger(hash(data)).abs();
     }
 
     public static void sortSampledKeys(List<DecoratedKey> keys, Range<Token> range)
@@ -363,13 +333,28 @@ public class FBUtilities
 
     public static <T> List<T> waitOnFutures(Iterable<? extends Future<? extends T>> futures)
     {
+        return waitOnFutures(futures, -1);
+    }
+
+    /**
+     * Block for a collection of futures, with an optional timeout for each future.
+     *
+     * @param futures
+     * @param ms The number of milliseconds to wait on each future. If this value is less than or equal to zero,
+     *           no tiemout value will be passed to {@link Future#get()}.
+     */
+    public static <T> List<T> waitOnFutures(Iterable<? extends Future<? extends T>> futures, long ms)
+    {
         List<T> results = new ArrayList<>();
         Throwable fail = null;
         for (Future<? extends T> f : futures)
         {
             try
             {
-                results.add(f.get());
+                if (ms <= 0)
+                    results.add(f.get());
+                else
+                    results.add(f.get(ms, TimeUnit.MILLISECONDS));
             }
             catch (Throwable t)
             {
@@ -724,20 +709,6 @@ public class FBUtilities
         buffer.position(position);
     }
 
-    private static final ThreadLocal<byte[]> threadLocalScratchBuffer = new ThreadLocal<byte[]>()
-    {
-        @Override
-        protected byte[] initialValue()
-        {
-            return new byte[CompressionParams.DEFAULT_CHUNK_LENGTH];
-        }
-    };
-
-    public static byte[] getThreadLocalScratchBuffer()
-    {
-        return threadLocalScratchBuffer.get();
-    }
-
     public static long abs(long index)
     {
         long negbit = index >> 63;
@@ -809,42 +780,6 @@ public class FBUtilities
         return historyDir;
     }
 
-    public static void updateWithShort(MessageDigest digest, int val)
-    {
-        digest.update((byte) ((val >> 8) & 0xFF));
-        digest.update((byte) (val & 0xFF));
-    }
-
-    public static void updateWithByte(MessageDigest digest, int val)
-    {
-        digest.update((byte) (val & 0xFF));
-    }
-
-    public static void updateWithInt(MessageDigest digest, int val)
-    {
-        digest.update((byte) ((val >>> 24) & 0xFF));
-        digest.update((byte) ((val >>> 16) & 0xFF));
-        digest.update((byte) ((val >>>  8) & 0xFF));
-        digest.update((byte) ((val >>> 0) & 0xFF));
-    }
-
-    public static void updateWithLong(MessageDigest digest, long val)
-    {
-        digest.update((byte) ((val >>> 56) & 0xFF));
-        digest.update((byte) ((val >>> 48) & 0xFF));
-        digest.update((byte) ((val >>> 40) & 0xFF));
-        digest.update((byte) ((val >>> 32) & 0xFF));
-        digest.update((byte) ((val >>> 24) & 0xFF));
-        digest.update((byte) ((val >>> 16) & 0xFF));
-        digest.update((byte) ((val >>>  8) & 0xFF));
-        digest.update((byte)  ((val >>> 0) & 0xFF));
-    }
-
-    public static void updateWithBoolean(MessageDigest digest, boolean val)
-    {
-        updateWithByte(digest, val ? 0 : 1);
-    }
-
     public static void closeAll(List<? extends AutoCloseable> l) throws Exception
     {
         Exception toThrow = null;
@@ -881,7 +816,7 @@ public class FBUtilities
             throw new RuntimeException(e);
         }
     }
-	
+
 	public static void sleepQuietly(long millis)
     {
         try
@@ -897,5 +832,13 @@ public class FBUtilities
     public static long align(long val, int boundary)
     {
         return (val + boundary) & ~(boundary - 1);
+    }
+
+    @VisibleForTesting
+    public static void reset()
+    {
+        localInetAddress = null;
+        broadcastInetAddress = null;
+        broadcastRpcAddress = null;
     }
 }

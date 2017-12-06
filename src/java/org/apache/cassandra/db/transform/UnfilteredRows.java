@@ -21,17 +21,25 @@
 package org.apache.cassandra.db.transform;
 
 import org.apache.cassandra.db.DeletionTime;
+import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 
 final class UnfilteredRows extends BaseRows<Unfiltered, UnfilteredRowIterator> implements UnfilteredRowIterator
 {
+    private RegularAndStaticColumns regularAndStaticColumns;
     private DeletionTime partitionLevelDeletion;
 
     public UnfilteredRows(UnfilteredRowIterator input)
     {
+        this(input, input.columns());
+    }
+
+    public UnfilteredRows(UnfilteredRowIterator input, RegularAndStaticColumns columns)
+    {
         super(input);
+        regularAndStaticColumns = columns;
         partitionLevelDeletion = input.partitionLevelDeletion();
     }
 
@@ -39,9 +47,17 @@ final class UnfilteredRows extends BaseRows<Unfiltered, UnfilteredRowIterator> i
     void add(Transformation add)
     {
         super.add(add);
+        regularAndStaticColumns = add.applyToPartitionColumns(regularAndStaticColumns);
         partitionLevelDeletion = add.applyToDeletion(partitionLevelDeletion);
     }
 
+    @Override
+    public RegularAndStaticColumns columns()
+    {
+        return regularAndStaticColumns;
+    }
+
+    @Override
     public DeletionTime partitionLevelDeletion()
     {
         return partitionLevelDeletion;

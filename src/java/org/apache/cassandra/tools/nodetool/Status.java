@@ -17,9 +17,9 @@
  */
 package org.apache.cassandra.tools.nodetool;
 
-import io.airlift.command.Arguments;
-import io.airlift.command.Command;
-import io.airlift.command.Option;
+import io.airlift.airline.Arguments;
+import io.airlift.airline.Command;
+import io.airlift.airline.Option;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -65,7 +65,7 @@ public class Status extends NodeToolCmd
         hostIDMap = probe.getHostIdMap();
         epSnitchInfo = probe.getEndpointSnitchInfoProxy();
 
-        StringBuffer errors = new StringBuffer();
+        StringBuilder errors = new StringBuilder();
 
         Map<InetAddress, Float> ownerships = null;
         boolean hasEffectiveOwns = false;
@@ -77,7 +77,7 @@ public class Status extends NodeToolCmd
         catch (IllegalStateException e)
         {
             ownerships = probe.getOwnership();
-            errors.append("Note: " + e.getMessage() + "%n");
+            errors.append("Note: ").append(e.getMessage()).append("%n");
         }
         catch (IllegalArgumentException ex)
         {

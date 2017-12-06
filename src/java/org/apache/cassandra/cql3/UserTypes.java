@@ -19,13 +19,15 @@ package org.apache.cassandra.cql3;
 
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.stream.Collectors;
 
-import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.apache.cassandra.cql3.Constants.UNSET_VALUE;
@@ -44,6 +46,77 @@ public abstract class UserTypes
                                        column.cfName,
                                        new ColumnIdentifier(column.name + "." + ut.fieldName(field), true),
                                        ut.fieldType(field));
+    }
+
+    public static <T extends AssignmentTestable> void validateUserTypeAssignableTo(ColumnSpecification receiver,
+                                                                                   Map<FieldIdentifier, T> entries)
+    {
+        if (!receiver.type.isUDT())
+            throw new InvalidRequestException(String.format("Invalid user type literal for %s of type %s", receiver, receiver.type.asCQL3Type()));
+
+        UserType ut = (UserType) receiver.type;
+        for (int i = 0; i < ut.size(); i++)
+        {
+            FieldIdentifier field = ut.fieldName(i);
+            T value = entries.get(field);
+            if (value == null)
+                continue;
+
+            ColumnSpecification fieldSpec = fieldSpecOf(receiver, i);
+            if (!value.testAssignment(receiver.ksName, fieldSpec).isAssignable())
+            {
+                throw new InvalidRequestException(String.format("Invalid user type literal for %s: field %s is not of type %s",
+                        receiver, field, fieldSpec.type.asCQL3Type()));
+            }
+        }
+    }
+
+    /**
+     * Tests that the map with the specified entries can be assigned to the specified column.
+     *
+     * @param receiver the receiving column
+     * @param entries the map entries
+     */
+    public static <T extends AssignmentTestable> AssignmentTestable.TestResult testUserTypeAssignment(ColumnSpecification receiver,
+                                                                                                      Map<FieldIdentifier, T> entries)
+    {
+        try
+        {
+            validateUserTypeAssignableTo(receiver, entries);
+            return AssignmentTestable.TestResult.WEAKLY_ASSIGNABLE;
+        }
+        catch (InvalidRequestException e)
+        {
+            return AssignmentTestable.TestResult.NOT_ASSIGNABLE;
+        }
+    }
+
+    /**
+     * Create a {@code String} representation of the user type from the specified items associated to
+     * the user type entries.
+     *
+     * @param items items associated to the user type entries
+     * @return a {@code String} representation of the user type
+     */
+    public static <T> String userTypeToString(Map<FieldIdentifier, T> items)
+    {
+        return userTypeToString(items, Object::toString);
+    }
+
+    /**
+     * Create a {@code String} representation of the user type from the specified items associated to
+     * the user type entries.
+     *
+     * @param items items associated to the user type entries
+     * @return a {@code String} representation of the user type
+     */
+    public static <T> String userTypeToString(Map<FieldIdentifier, T> items,
+                                              java.util.function.Function<T, String> mapper)
+    {
+        return items.entrySet()
+                    .stream()
+                    .map(p -> String.format("%s: %s", p.getKey(), mapper.apply(p.getValue())))
+                    .collect(Collectors.joining(", ", "{", "}"));
     }
 
     public static class Literal extends Term.Raw
@@ -95,7 +168,7 @@ public abstract class UserTypes
         private void validateAssignableTo(String keyspace, ColumnSpecification receiver) throws InvalidRequestException
         {
             if (!receiver.type.isUDT())
-                throw new InvalidRequestException(String.format("Invalid user type literal for %s of type %s", receiver, receiver.type.asCQL3Type()));
+                throw new InvalidRequestException(String.format("Invalid user type literal for %s of type %s", receiver.name, receiver.type.asCQL3Type()));
 
             UserType ut = (UserType)receiver.type;
             for (int i = 0; i < ut.size(); i++)
@@ -109,22 +182,14 @@ public abstract class UserTypes
                 if (!value.testAssignment(keyspace, fieldSpec).isAssignable())
                 {
                     throw new InvalidRequestException(String.format("Invalid user type literal for %s: field %s is not of type %s",
-                            receiver, field, fieldSpec.type.asCQL3Type()));
+                            receiver.name, field, fieldSpec.type.asCQL3Type()));
                 }
             }
         }
 
         public AssignmentTestable.TestResult testAssignment(String keyspace, ColumnSpecification receiver)
         {
-            try
-            {
-                validateAssignableTo(keyspace, receiver);
-                return AssignmentTestable.TestResult.WEAKLY_ASSIGNABLE;
-            }
-            catch (InvalidRequestException e)
-            {
-                return AssignmentTestable.TestResult.NOT_ASSIGNABLE;
-            }
+            return testUserTypeAssignment(receiver, entries);
         }
 
         public AbstractType<?> getExactTypeIfKnown(String keyspace)
@@ -134,18 +199,7 @@ public abstract class UserTypes
 
         public String getText()
         {
-            StringBuilder sb = new StringBuilder();
-            sb.append("{");
-            Iterator<Map.Entry<FieldIdentifier, Term.Raw>> iter = entries.entrySet().iterator();
-            while (iter.hasNext())
-            {
-                Map.Entry<FieldIdentifier, Term.Raw> entry = iter.next();
-                sb.append(entry.getKey()).append(": ").append(entry.getValue().getText());
-                if (iter.hasNext())
-                    sb.append(", ");
-            }
-            sb.append("}");
-            return sb.toString();
+            return userTypeToString(entries, Term.Raw::getText);
         }
     }
 
@@ -162,17 +216,11 @@ public abstract class UserTypes
 
         public static Value fromSerialized(ByteBuffer bytes, UserType type)
         {
-            ByteBuffer[] values = type.split(bytes);
-            if (values.length > type.size())
-            {
-                throw new InvalidRequestException(String.format(
-                        "UDT value contained too many fields (expected %s, got %s)", type.size(), values.length));
-            }
-
+            type.validate(bytes);
             return new Value(type, type.split(bytes));
         }
 
-        public ByteBuffer get(int protocolVersion)
+        public ByteBuffer get(ProtocolVersion protocolVersion)
         {
             return TupleType.buildValue(elements);
         }
@@ -278,7 +326,7 @@ public abstract class UserTypes
 
     public static class Setter extends Operation
     {
-        public Setter(ColumnDefinition column, Term t)
+        public Setter(ColumnMetadata column, Term t)
         {
             super(column, t);
         }
@@ -324,7 +372,7 @@ public abstract class UserTypes
     {
         private final FieldIdentifier field;
 
-        public SetterByField(ColumnDefinition column, FieldIdentifier field, Term t)
+        public SetterByField(ColumnMetadata column, FieldIdentifier field, Term t)
         {
             super(column, t);
             this.field = field;
@@ -351,7 +399,7 @@ public abstract class UserTypes
     {
         private final FieldIdentifier field;
 
-        public DeleterByField(ColumnDefinition column, FieldIdentifier field)
+        public DeleterByField(ColumnMetadata column, FieldIdentifier field)
         {
             super(column, null);
             this.field = field;

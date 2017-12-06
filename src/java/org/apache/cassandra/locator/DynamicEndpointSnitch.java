@@ -30,6 +30,7 @@ import com.codahale.metrics.ExponentiallyDecayingReservoir;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
+import com.codahale.metrics.Snapshot;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.gms.ApplicationState;
@@ -100,9 +101,13 @@ public class DynamicEndpointSnitch extends AbstractEndpointSnitch implements ILa
                 reset();
             }
         };
-        updateSchedular = ScheduledExecutors.scheduledTasks.scheduleWithFixedDelay(update, dynamicUpdateInterval, dynamicUpdateInterval, TimeUnit.MILLISECONDS);
-        resetSchedular = ScheduledExecutors.scheduledTasks.scheduleWithFixedDelay(reset, dynamicResetInterval, dynamicResetInterval, TimeUnit.MILLISECONDS);
-        registerMBean();
+
+        if (DatabaseDescriptor.isDaemonInitialized())
+        {
+            updateSchedular = ScheduledExecutors.scheduledTasks.scheduleWithFixedDelay(update, dynamicUpdateInterval, dynamicUpdateInterval, TimeUnit.MILLISECONDS);
+            resetSchedular = ScheduledExecutors.scheduledTasks.scheduleWithFixedDelay(reset, dynamicResetInterval, dynamicResetInterval, TimeUnit.MILLISECONDS);
+            registerMBean();
+        }
     }
 
     /**
@@ -114,15 +119,21 @@ public class DynamicEndpointSnitch extends AbstractEndpointSnitch implements ILa
         if (dynamicUpdateInterval != DatabaseDescriptor.getDynamicUpdateInterval())
         {
             dynamicUpdateInterval = DatabaseDescriptor.getDynamicUpdateInterval();
-            updateSchedular.cancel(false);
-            updateSchedular = ScheduledExecutors.scheduledTasks.scheduleWithFixedDelay(update, dynamicUpdateInterval, dynamicUpdateInterval, TimeUnit.MILLISECONDS);
+            if (DatabaseDescriptor.isDaemonInitialized())
+            {
+                updateSchedular.cancel(false);
+                updateSchedular = ScheduledExecutors.scheduledTasks.scheduleWithFixedDelay(update, dynamicUpdateInterval, dynamicUpdateInterval, TimeUnit.MILLISECONDS);
+            }
         }
 
         if (dynamicResetInterval != DatabaseDescriptor.getDynamicResetInterval())
         {
             dynamicResetInterval = DatabaseDescriptor.getDynamicResetInterval();
-            resetSchedular.cancel(false);
-            resetSchedular = ScheduledExecutors.scheduledTasks.scheduleWithFixedDelay(reset, dynamicResetInterval, dynamicResetInterval, TimeUnit.MILLISECONDS);
+            if (DatabaseDescriptor.isDaemonInitialized())
+            {
+                resetSchedular.cancel(false);
+                resetSchedular = ScheduledExecutors.scheduledTasks.scheduleWithFixedDelay(reset, dynamicResetInterval, dynamicResetInterval, TimeUnit.MILLISECONDS);
+            }
         }
 
         dynamicBadnessThreshold = DatabaseDescriptor.getDynamicBadnessThreshold();
@@ -223,7 +234,7 @@ public class DynamicEndpointSnitch extends AbstractEndpointSnitch implements ILa
         {
             Double score = scores.get(inet);
             if (score == null)
-                return;
+                continue;
             subsnitchOrderedScores.add(score);
         }
 
@@ -253,13 +264,11 @@ public class DynamicEndpointSnitch extends AbstractEndpointSnitch implements ILa
         if (scored1 == null)
         {
             scored1 = 0.0;
-            receiveTiming(a1, 0);
         }
 
         if (scored2 == null)
         {
             scored2 = 0.0;
-            receiveTiming(a2, 0);
         }
 
         if (scored1.equals(scored2))
@@ -305,19 +314,26 @@ public class DynamicEndpointSnitch extends AbstractEndpointSnitch implements ILa
 
         }
         double maxLatency = 1;
+
+        Map<InetAddress, Snapshot> snapshots = new HashMap<>(samples.size());
+        for (Map.Entry<InetAddress, ExponentiallyDecayingReservoir> entry : samples.entrySet())
+        {
+            snapshots.put(entry.getKey(), entry.getValue().getSnapshot());
+        }
+
         // We're going to weight the latency for each host against the worst one we see, to
         // arrive at sort of a 'badness percentage' for them. First, find the worst for each:
         HashMap<InetAddress, Double> newScores = new HashMap<>();
-        for (Map.Entry<InetAddress, ExponentiallyDecayingReservoir> entry : samples.entrySet())
+        for (Map.Entry<InetAddress, Snapshot> entry : snapshots.entrySet())
         {
-            double mean = entry.getValue().getSnapshot().getMedian();
+            double mean = entry.getValue().getMedian();
             if (mean > maxLatency)
                 maxLatency = mean;
         }
         // now make another pass to do the weighting based on the maximums we found before
-        for (Map.Entry<InetAddress, ExponentiallyDecayingReservoir> entry: samples.entrySet())
+        for (Map.Entry<InetAddress, Snapshot> entry : snapshots.entrySet())
         {
-            double score = entry.getValue().getSnapshot().getMedian() / maxLatency;
+            double score = entry.getValue().getMedian() / maxLatency;
             // finally, add the severity without any weighting, since hosts scale this relative to their own load and the size of the task causing the severity.
             // "Severity" is basically a measure of compaction activity (CASSANDRA-3722).
             if (USE_SEVERITY)

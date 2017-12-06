@@ -17,28 +17,34 @@
  */
 package org.apache.cassandra.cql3.statements;
 
-import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.cql3.CQL3Type;
 
+/**
+ * Stores a column name and optionally type for an Alter Table statement definition.
+ *
+ * This is used by AlterTableStatement to store the added, altered or dropped columns.
+ */
 public class AlterTableStatementColumn
 {
     private final CQL3Type.Raw dataType;
-    private final ColumnDefinition.Raw colName;
+    private final ColumnMetadata.Raw colName;
     private final Boolean isStatic;
 
-    public AlterTableStatementColumn(ColumnDefinition.Raw colName, CQL3Type.Raw dataType, boolean isStatic)
+    public AlterTableStatementColumn(ColumnMetadata.Raw colName, CQL3Type.Raw dataType, boolean isStatic)
     {
-        this.dataType = dataType;
+        assert colName != null;
+        this.dataType = dataType; // will be null when dropping columns, and never null otherwise (for ADD and ALTER).
         this.colName = colName;
         this.isStatic = isStatic;
     }
 
-    public AlterTableStatementColumn(ColumnDefinition.Raw colName, CQL3Type.Raw dataType)
+    public AlterTableStatementColumn(ColumnMetadata.Raw colName, CQL3Type.Raw dataType)
     {
-        this(colName, dataType,false );
+        this(colName, dataType, false);
     }
 
-    public AlterTableStatementColumn(ColumnDefinition.Raw colName)
+    public AlterTableStatementColumn(ColumnMetadata.Raw colName)
     {
         this(colName, null, false);
     }
@@ -48,7 +54,7 @@ public class AlterTableStatementColumn
         return dataType;
     }
 
-    public ColumnDefinition.Raw getColumnName()
+    public ColumnMetadata.Raw getColumnName()
     {
         return colName;
     }
